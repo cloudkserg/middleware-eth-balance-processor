@@ -37,6 +37,7 @@ describe('core/balance processor', function () {
 
     accounts = await Promise.promisify(web3.eth.getAccounts)();
     await saveAccountForAddress(accounts[0]);
+    await clearQueues(amqpInstance);
     return await awaitLastBlock(web3);
   });
 

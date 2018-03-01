@@ -15,6 +15,8 @@ const awaitLastBlock = require('./helpers/awaitLastBlock'),
   getBalanceForAddress = require('./helpers/getBalanceForAddress'),
   connectToQueue = require('./helpers/connectToQueue'),
   clearQueues = require('./helpers/clearQueues'),
+  consumeMessages = require('./helpers/consumeMessages'),
+  consumeStompMessages = require('./helpers/consumeStompMessages'),
   net = require('net'),
   path = require('path'),
   Web3 = require('web3'),
@@ -23,8 +25,7 @@ const awaitLastBlock = require('./helpers/awaitLastBlock'),
   WebSocket = require('ws'),
   accountModel = require('../models/accountModel'),
   amqp = require('amqplib'),
-  Stomp = require('webstomp-client'),
-  ctx = {};
+  Stomp = require('webstomp-client');
 
 let accounts, amqpInstance;
 describe('core/balance processor', function () {
@@ -38,7 +39,7 @@ describe('core/balance processor', function () {
     accounts = await Promise.promisify(web3.eth.getAccounts)();
     await saveAccountForAddress(accounts[0]);
     await clearQueues(amqpInstance);
-    return await awaitLastBlock(web3);
+    //return await awaitLastBlock(web3);
   });
 
   after(async () => {
@@ -86,109 +87,74 @@ describe('core/balance processor', function () {
     await syncBalanceForAddress(accounts[0], web3);
     const balanceBefore = await getBalanceForAddress(accounts[0]);
 
-    ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
-      from: accounts[0],
-      to: accounts[1],
-      value: 100
-    });
-
-    expect(ctx.hash).to.be.string;
-
-    await Promise.all([
-      (async () => {
-
-        const channel = await amqpInstance.createChannel();
-        await connectToQueue(channel);
-        
-        return await new Promise(res =>
-          channel.consume(
-            `app_${config.rabbit.serviceName}_test.balance`, 
-            async (message) => { 
-              try{
-                const balanceAfter = await getBalanceForAddress(accounts[0]);
-                expect(balanceBefore.minus(balanceAfter).toNumber()).to.greaterThan(100);
-                await checkMessage(JSON.parse(message.content), balanceAfter); 
-              } catch (e) {
-                  console.error(e);
-              }
-              await channel.cancel(message.fields.consumerTag);
-              res();
-            },
-            {noAck: true}
-        ));
-
+    return await Promise.all([
+      (async() => {
+        const hash = await Promise.promisify(web3.eth.sendTransaction)({
+          from: accounts[0],
+          to: accounts[1],
+          value: 100
+        });
+        expect(hash).to.be.string;
+        expect(hash).to.be.not.undefined;
       })(),
       (async () => {
-        let ws = new WebSocket('ws://localhost:15674/ws');
-        let client = Stomp.over(ws, {heartbeat: false, debug: false});
-        return await new Promise(res =>
-          client.connect('guest', 'guest', () => {
-            const subscribe = client.subscribe(
-              `/exchange/events/${config.rabbit.serviceName}_balance.*`, 
-              async (message) => { 
-                  try{
-                    await checkMessage(JSON.parse(message.body)); 
-                  } catch (e) {
-                      console.error(e);
-                  }
-                  await subscribe.unsubscribe();
-                  res();                  
-              }
-            );
-          })
-        );
+        const channel = await amqpInstance.createChannel();  
+        await connectToQueue(channel);
+        return await consumeMessages(1, channel, async (message) => {
+          const balanceAfter = await getBalanceForAddress(accounts[0]);
+          expect(balanceBefore.minus(balanceAfter).toNumber()).to.greaterThan(100);
+          await checkMessage(JSON.parse(message.content), balanceAfter); 
+        });
+      })(),
+      (async () => {
+        const ws = new WebSocket('ws://localhost:15674/ws');
+        const client = Stomp.over(ws, {heartbeat: false, debug: false});
+        return await consumeStompMessages(1, client, async (message) => {
+          await checkMessage(JSON.parse(message.body)); 
+        });
       })()
     ]);
+
 
 
   });
 
   it('send some eth from non auth accounts (3 => 2) and not messages', async () => {
-    ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
-      from: accounts[2],
-      to: accounts[3],
+    await Promise.promisify(web3.eth.sendTransaction)({
+      from: accounts[1],
+      to: accounts[2],
       value: 100
     });
-    expect(ctx.hash).to.be.string;
-
-    const channel = await amqpInstance.createChannel();  
-    const balanceQueue = await connectToQueue(channel);  
-    expect(balanceQueue.messageCount).to.equal(0);
-
+    Promise.delay(1000, async() => {
+      const channel = await amqpInstance.createChannel();  
+      const queue =await connectToQueue(channel); 
+      expect(queue.messageCount).to.equal(0);
+    });
   });
 
   it('send some eth from reverse accounts(1 => 0) and  check that in database, that right user get the exact right amount of coins', async () => {
     await syncBalanceForAddress(accounts[0], web3);
     const balanceBefore = await getBalanceForAddress(accounts[0]);
 
-
-    ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
-      to: accounts[0],
-      from: accounts[1],
-      value: 500
-    });
-    expect(ctx.hash).to.be.string;
-
-    const channel = await amqpInstance.createChannel();    
-    await connectToQueue(channel);
-
-    return await new Promise(res =>
-      channel.consume(
-        `app_${config.rabbit.serviceName}_test.balance`, 
-        async (message) => { 
-          try {
-            const balanceAfter = await getBalanceForAddress(accounts[0]);
-            expect(balanceAfter.minus(balanceBefore).toNumber()).to.equal(500);
-          } catch (e) {
-            console.error(e);
-          }
-          await channel.cancel(message.fields.consumerTag);
-          return res(); 
-        },
-        {noAck: true}        
-      )
-    );
-
+    return await Promise.all([
+      (async() => {
+        const hash = await Promise.promisify(web3.eth.sendTransaction)({
+          from: accounts[1],
+          to: accounts[0],
+          value: 500
+        });
+        expect(hash).to.be.string;
+        expect(hash).to.be.not.undefined;
+      })(),
+      (async () => {
+        const channel = await amqpInstance.createChannel();  
+        await connectToQueue(channel);
+        return await consumeMessages(1, channel, async (message) => {
+          const balanceAfter = await getBalanceForAddress(accounts[0]);
+          expect(balanceAfter.minus(balanceBefore).toNumber()).to.equal(500);
+        });
+      })()
+    ]);
   });
 
 });

@@ -15,7 +15,7 @@ const _ = require('lodash'),
   solidityEvent = require('../node_modules/web3/lib/web3/event.js'),
   config = require('../config');
 
-module.exports = async (tx, web3, smEvents) => {
+module.exports = (tx, web3, smEvents) => {
   if (_.get(tx, 'logs', []).length === 0)
     return [];
 

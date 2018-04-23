@@ -28,9 +28,11 @@ const  net = require('net'),
   erc20token = require('../build/contracts/TokenContract.json'),
   smEvents = require('../controllers/eventsCtrl')(erc20token),  
   erc20contract = contract(erc20token),
-  expectAccountHasBalance = require('./helpers/expectAccountHasBalance'),
   getBalanceForTCAddress = require('./helpers/getBalanceforTCAddress'),
+  getBalanceForAccount= require('./helpers/getBalanceForAccount'),
   clearQueues = require('./helpers/clearQueues'),
+  updateBalanceWithEth = require('./helpers/updateBalanceWithEth'),
+  updateTcBalanceWithEth = require('./helpers/updateTcBalanceWithEth'),
   connectToQueue = require('./helpers/connectToQueue'),
   clearMongoData = require('./helpers/clearMongoData'),
   saveAccounts = require('./helpers/saveAccounts'),
@@ -63,47 +65,53 @@ describe('core/sc processor', function () {
     return await clearQueues(amqpInstance);  
   });
 
-  // it('send some eth and validate balance changes', async () => {
+  it('send some eth and validate balance changes', async () => {
+    await Promise.all([
+      (async () => {
+        const oldBalance0 = await updateBalanceWithEth(accounts[0], web3);      
+        const oldBalance1 = await updateBalanceWithEth(accounts[1], web3);       
 
-  //   let accounts = await Promise.promisify(web3.eth.getAccounts)();
-  //   ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
-  //     from: accounts[0],
-  //     to: accounts[1],
-  //     value: 100
-  //   });
+        ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
+          from: accounts[0],
+          to: accounts[1],
+          value: 100
+        });
+    
+        await Promise.delay(10000);
+        const newBalance0 = await getBalanceForAccount(accounts[0]);
+        const newBalance1 = await getBalanceForAccount(accounts[1]);
+        expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(0);
+        expect(newBalance1.minus(oldBalance1).toNumber()).to.greaterThan(0);
+      })(),
+      (async () => {
 
-  //   expect(ctx.hash).to.be.string;
+        let amqpInstance = await amqp.connect(config.rabbit.url);
+        let channel = await amqpInstance.createChannel();
+        try {
+          await channel.assertExchange('events', 'topic', {durable: false});
+          await channel.assertQueue(`app_${config.rabbit.serviceName}_test.balance`);
+          await channel.bindQueue(`app_${config.rabbit.serviceName}_test.balance`, 'events', `${config.rabbit.serviceName}_balance.*`);
+        } catch (e) {
+          channel = await amqpInstance.createChannel();
+        }
 
-  //   await Promise.all([
-  //     (async () => {
+        return await new Promise(res =>
+          channel.consume(`app_${config.rabbit.serviceName}_test.balance`, res, {noAck: true})
+        );
 
-  //       let amqpInstance = await amqp.connect(config.rabbit.url);
-  //       let channel = await amqpInstance.createChannel();
-  //       try {
-  //         await channel.assertExchange('events', 'topic', {durable: false});
-  //         await channel.assertQueue(`app_${config.rabbit.serviceName}_test.balance`);
-  //         await channel.bindQueue(`app_${config.rabbit.serviceName}_test.balance`, 'events', `${config.rabbit.serviceName}_balance.*`);
-  //       } catch (e) {
-  //         channel = await amqpInstance.createChannel();
-  //       }
+      })(),
+      (async () => {
+        let ws = new WebSocket('ws://localhost:15674/ws');
+        let client = Stomp.over(ws, {heartbeat: false, debug: false});
+        return await new Promise(res =>
+          client.connect('guest', 'guest', () => {
+            client.subscribe(`/exchange/events/${config.rabbit.serviceName}_balance.*`, res);
+          })
+        );
+      })()
+    ]);
 
-  //       return await new Promise(res =>
-  //         channel.consume(`app_${config.rabbit.serviceName}_test.balance`, res, {noAck: true})
-  //       );
-
-  //     })(),
-  //     (async () => {
-  //       let ws = new WebSocket('ws://localhost:15674/ws');
-  //       let client = Stomp.over(ws, {heartbeat: false, debug: false});
-  //       return await new Promise(res =>
-  //         client.connect('guest', 'guest', () => {
-  //           client.subscribe(`/exchange/events/${config.rabbit.serviceName}_balance.*`, res)
-  //         })
-  //       );
-  //     })()
-  //   ]);
-
-  // });
+  });
 
   it('common: check Module /controllers/eventsCtrl', async () => {
     expect(smEvents).to.have.property('eventModels');
@@ -115,80 +123,50 @@ describe('core/sc processor', function () {
     expect(events).to.include.members(['Transfer', 'Approval']);
   });
 
-  // CREATION
-  it('creation: should create an initial balance of 1000000 for the creator', async () => {
-    expect(await getBalanceForTCAddress(TC, accounts[0])).to.equal(1000000);
-  });
-
   //TRANSERS
   it('transfer: should transfer 100000 for accounts[0 => 1] and check balances, records in DB and amqp data', async () => {
+    const oldBalance0 = await updateTcBalanceWithEth(accounts[0], TC);      
+    const oldBalance1 = await updateTcBalanceWithEth(accounts[1], TC); 
+    let transfer;
     return await Promise.all([
       (async () => {
-        const transfer = await TC.transfer(accounts[1], 100000, {from: accounts[0]});
-        await Promise.delay(5000);
-        expect(await getBalanceForTCAddress(TC, accounts[0])).to.equal(900000);
-        expect(await getBalanceForTCAddress(TC, accounts[1])).to.equal(100000);
-    
-        await Promise.delay(20000);
-        await expectAccountHasBalance(accounts[0], TC.address, 900000);
-        await expectAccountHasBalance(accounts[1], TC.address, 100000);
-        console.log('AAAAAAAAAAAAA');
+        transfer = await TC.transfer(accounts[1], 100000, {from: accounts[0]});
       })(),
       (async () => {
         const channel = await amqpInstance.createChannel();  
         await connectToQueue(channel);
         return await consumeMessages(1, channel, async (message) => {
-          console.log('BBBBBBBBBBBBBB');          
           const content = JSON.parse(message.content);
-          expect(content).to.contain.all.keys(['address', 'balance']);
-          expect(content.address).oneOf([accounts[0], accounts[1]]);
+          if (_.has(content, 'erc20token') && content.tx.transactionHash  === transfer.tx) {
+            expect(content.address).oneOf([accounts[0], accounts[1]]);
+            expect(content.erc20token).to.equal(TC.address);
+  
+            if (content.address === accounts[0]) 
+              expect(oldBalance0.minus(new BigNumber(content.balance)).toNumber()).to.greaterThan(0);
+            else 
+              expect(new BigNumber(content.balance).minus(oldBalance1).toNumber()).to.equal(100000);
+            
+            const newBalance0 = await getBalanceForTCAddress(accounts[0], TC);
+            const newBalance1 = await getBalanceForTCAddress(accounts[1], TC);
+            expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(0);
+            expect(newBalance1.minus(oldBalance1).toNumber()).to.greaterThan(0);
 
-          if (content.address === accounts[0]) 
-            expect(new BigNumber(content.balance).toNumber()).to.greaterThan(900000);
-          else 
-            expect(new BigNumber(content.balance).toNumber()).to.greaterThan(100000);
+            return true;
+          } else 
+            return false;
         });
       })()
     ]);
   });
 
-  // it('transfer: should transfer 100000 for accounts[1 => 0] and check balances, records in DB and amqp data', async () => {
-  //   return await Promise.all([
-  //     (async () => {
-  //       const transfer = await TC.transfer(accounts[0], 100000, {from: accounts[1]});
 
-  //       await Promise.delay(5000);
-  //       expect(await getBalanceForTCAddress(TC, accounts[0])).to.equal(1000000);
-  //       expect(await getBalanceForTCAddress(TC, accounts[1])).to.equal(0);
-    
-  //       await Promise.delay(15000);
-  //       await expectAccountHasBalance(accounts[0], TC.address, 1000000);
-  //       await expectAccountHasBalance(accounts[1], TC.address, 0);
-  //     })(),
-  //     (async () => {
-  //       const channel = await amqpInstance.createChannel();  
-  //       await connectToQueue(channel);
-  //       return await consumeMessages(2, channel, async (message) => {
-  //         const content = JSON.parse(message.content);
-  //         expect(content).to.contain.all.keys(['address', 'balance']);
-  //         expect(content.address).oneOf([accounts[0], accounts[1]]);
+  it('transfer: should transfer 1000 for accounts [2 => 3] and check not message in amqp', async () => {
+    await TC.transfer(accounts[3], 100000, {from: accounts[2]});
+    await Promise.delay(20000);
 
-  //         if (content.address === accounts[0]) 
-  //           expect(content.balance).to.equal(1000000);
-  //         else 
-  //           expect(content.balance).to.equal(0);
-  //       });
-  //     })()
-  //   ]);
-  // });
-
-  // it('transfer: should transfer 1000 for accounts [2 => 3] and check not message in amqp', async () => {
-  //   await TC.transfer(accounts[3], 100000, {from: accounts[2]});
-  //   await Promise.delay(20000);
-
-  //   const channel = await amqpInstance.createChannel();  
-  //   const queue = await connectToQueue(channel);
-  //   expect(queue.messageCount).to.equal(0);
-  // });
+    const channel = await amqpInstance.createChannel();  
+    const queue = await connectToQueue(channel);
+    expect(queue.messageCount).to.equal(0);
+  });
 
 });

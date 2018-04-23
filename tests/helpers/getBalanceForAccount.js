@@ -5,7 +5,7 @@
 */
 const accountModel = require('../../models/accountModel'),
   BigNumber = require('bignumber.js');
-module.exports = async (address, TC) => {
+module.exports = async (address) => {
   const account = await accountModel.findOne({address: address});
-  return new BigNumber(account['erc20token'][TC.address]);
+  return new BigNumber(account['balance']);
 };

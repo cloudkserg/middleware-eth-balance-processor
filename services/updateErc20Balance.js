@@ -10,6 +10,8 @@ const _ = require('lodash'),
   Promise = require('bluebird'),
   accountModel = require('../models/accountModel');
 
+const TIMEOUT_WAIT=10000;
+
 /**
  * Get balance from the network
  * @param  {Object} instance Web3 instance
@@ -32,20 +34,14 @@ const updateBalance = async (Erc20Contract, erc20addr, payload) => {
   const from = _.get(payload, 'from') || _.get(payload, 'owner'),
     to = _.get(payload, 'to') || _.get(payload, 'spender'),
     instance = await Erc20Contract.at(erc20addr);
-  console.log(0, [from, to, erc20addr]);
     
-
   return await Promise.map([from, to], async address => {
     let obj = {};
-    console.log(1, address);
     let balance = await getBalance(instance, address);
-    console.log(2, address);    
     obj[`erc20token.${erc20addr}`] = balance;
-    console.log(3, address);        
-    await accountModel.update({address: address}, {$set: _.set({}, `erc20token.${erc20addr}`, balance)});
-    console.log(4, address);            
-    return {address, balance};
-  });
+    await accountModel.findOneAndUpdate({address: address}, {$set: {[`erc20token.${erc20addr}`]: balance}});
+    return {address, erc20token: erc20addr, balance};
+  }).timeout(TIMEOUT_WAIT);
 };
 
 module.exports = updateBalance;

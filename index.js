@@ -19,11 +19,13 @@ const config = require('./config'),
   Promise = require('bluebird');
 
 mongoose.Promise = Promise;
+mongoose.connect(config.mongo.data.uri, {useMongoClient: true});
 mongoose.accounts = mongoose.createConnection(config.mongo.accounts.uri, {useMongoClient: true});
 
 const accountModel = require('./models/accountModel'),
   Web3 = require('web3'),
   net = require('net'),
+  _ = require('lodash'),
   bunyan = require('bunyan'),
   contract = require('truffle-contract'),
   log = bunyan.createLogger({name: 'core.balanceProcessor'}),
@@ -33,10 +35,12 @@ const accountModel = require('./models/accountModel'),
   updateErc20Balance = require('./services/updateErc20Balance'),
   filterTxsBySMEventsService = require('./services/filterTxsBySMEventsService');
 
-mongoose.accounts.on('disconnected', function () {
-  log.error('mongo disconnected!');
-  process.exit(0);
-});
+[mongoose.accounts, mongoose.connection].forEach(connection =>
+  connection.on('disconnected', function () {
+    log.error('mongo disconnected!');
+    process.exit(0);
+  })
+);
 
 const provider = new Web3.providers.IpcProvider(config.web3.uri, net);
 const web3 = new Web3();
@@ -48,34 +52,23 @@ Erc20Contract.setProvider(provider);
 
 
 const checkErc20Balance = async (tx, channel) => {
-  let filtered = tx ? await filterTxsBySMEventsService(tx, web3, smEvents) : [];
+  let filtered = tx ? filterTxsBySMEventsService(tx, web3, smEvents) : [];
   for (let i = 0; i < filtered.length; i++) {
     let event = filtered[i];
-    console.log('YYYYY');
     let updatedBalances = await updateErc20Balance(Erc20Contract, tx.logs[i].address, event.payload);
-    console.log('CCCCCC', event.payload);
-    await new Promise(res => {
-      event.payload.save().then(res).catch(
-        console.log
-      );
-    }).timeout(10000);
-    console.log('DDDDDDD');
-    for (let updateBalance of updatedBalances) {
-      console.log('LLLLLLLLLL', `${config.rabbit.serviceName}_balance.${event.name.toLowerCase()}`);
-      channel.publish('events', `${config.rabbit.serviceName}_balance.${event.name.toLowerCase()}`, new Buffer(JSON.stringify(updateBalance)));
-    }
+    await event.payload.save().catch(()=> {});
+    for (let updateBalance of updatedBalances) 
+      channel.publish('events', `${config.rabbit.serviceName}_balance.${event.name.toLowerCase()}`, new Buffer(JSON.stringify(
+        _.merge(updateBalance, {tx: tx})
+      )));
   }
 };
 
 const checkBalance = async (tx, channel) => {
   let accounts = tx ? await accountModel.find({address: {$in: [tx.to, tx.from]}}) : [];
-
   for (let account of accounts) {
     let balance = await Promise.promisify(web3.eth.getBalance)(account.address);
-    await accountModel.update({address: account.address}, {$set: {balance: balance}})
-      .catch(() => {
-      });
-
+    await accountModel.findOneAndUpdate({address: account.address}, {$set: {balance}});
     await  channel.publish('events', `${config.rabbit.serviceName}_balance.${account.address}`, new Buffer(JSON.stringify({
       address: account.address,
       balance: balance,
@@ -110,6 +103,7 @@ let init = async () => {
     process.exit(0);
   });
 
+
   await channel.assertExchange('events', 'topic', {durable: false});
   await channel.assertQueue(`app_${config.rabbit.serviceName}.balance_processor`);
   await channel.bindQueue(`app_${config.rabbit.serviceName}.balance_processor`, 'events', `${config.rabbit.serviceName}_transaction.*`);
@@ -119,21 +113,23 @@ let init = async () => {
   channel.consume(`app_${config.rabbit.serviceName}.balance_processor`, async (data) => {
     try {
       let block = JSON.parse(data.content.toString());
-      let tx;
-      try{
-        tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '').timeout(10000);
-      } catch(e) {
-        tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '');
-      }
-      await checkBalance(tx, channel);
-      await checkErc20Balance(tx, channel);
+      await Promise.all([
+        (async () => {
+          const tx = await Promise.promisify(web3.eth.getTransaction)(block.hash || '').timeout(10000);
+          await checkBalance(tx, channel);
+        })(),
+        (async () => {
+          const tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '').timeout(10000);            
+          await checkErc20Balance(tx, channel);
+        })(),
+      ]);
+
+
     } catch (e) {
-      console.log(e);
-      
       log.error(e);
     }
+    channel.ack(data);    
 
-    channel.ack(data);
   });
 };
 

@@ -30,6 +30,12 @@ const config = {
   web3: {
     network: process.env.NETWORK || 'development',
     uri: `${/^win/.test(process.platform) ? '\\\\.\\pipe\\' : ''}${process.env.WEB3_URI || `/tmp/${(process.env.NETWORK || 'development')}/geth.ipc`}`
+  },
+  smartContracts: {
+    events: {
+      listen: parseInt(process.env.SMART_CONTRACTS_EVENTS_LISTEN) || false,
+      ttl: parseInt(process.env.SMART_CONTRACTS_EVENTS_TTL) || false
+    }
   }
 };
 

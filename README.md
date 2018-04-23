@@ -12,6 +12,16 @@ This module is a part of middleware services. You can install it in 2 ways:
 ##### About
 This module is used for updating balances for the specified addresses (see a description of addresses manipulation in [rest module](https://github.com/ChronoBank/middleware-eth-rest)).
 
+
+##### About erc20
+
+This how does it work:
+1) This module load a sample contract (TokenContract) and use signatures for ERC20 token events;
+2) Blockprocessor populate Ethtransactions collection with matched transactions by tx.to, tx.from, addresses from logs and EthAccounts.erc20token collection;
+3) Erc20Processor listen to RabbitMQ "eth_transaction.\*" routing keys and filter out those txs which corresponds to the ERC20 tokens by signature in logs.topics[0];
+4) Module extracts event's data from matched transactions and save it to DB (Transfers, Approvals collections for ERC20).
+5) Moreover ERC20Processor push balance update to the RabbitMQ under the following route  <RABBIT_SERVICE_NAME>_balance.<event_name>,  and to DB (EthAccounts.erc20token collection).
+
 ##### сonfigure your .env
 
 To apply your configuration, create a .env file in root folder of repo (in case it's not present already).

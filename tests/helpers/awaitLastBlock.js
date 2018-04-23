@@ -16,7 +16,7 @@ module.exports = (web3) =>
       await Promise.delay(10000);
       let currentBlock = await blockModel.findOne({network: config.web3.network});
       _.get(currentBlock, 'block', 0) > latestBlock - 10 ?
-        res() : check()
+        res() : check();
     };
     check();
   });

@@ -25,13 +25,65 @@ const accountModel = require('./models/accountModel'),
   Web3 = require('web3'),
   net = require('net'),
   bunyan = require('bunyan'),
+  contract = require('truffle-contract'),
   log = bunyan.createLogger({name: 'core.balanceProcessor'}),
-  amqp = require('amqplib');
+  amqp = require('amqplib'),
+  erc20token = require('./build/contracts/TokenContract.json'),
+  smEvents = require('./controllers/eventsCtrl')(erc20token),
+  updateErc20Balance = require('./services/updateErc20Balance'),
+  filterTxsBySMEventsService = require('./services/filterTxsBySMEventsService');
 
 mongoose.accounts.on('disconnected', function () {
   log.error('mongo disconnected!');
   process.exit(0);
 });
+
+const provider = new Web3.providers.IpcProvider(config.web3.uri, net);
+const web3 = new Web3();
+web3.setProvider(provider);
+
+
+const Erc20Contract = contract(erc20token);
+Erc20Contract.setProvider(provider);
+
+
+const checkErc20Balance = async (tx, channel) => {
+  let filtered = tx ? await filterTxsBySMEventsService(tx, web3, smEvents) : [];
+  for (let i = 0; i < filtered.length; i++) {
+    let event = filtered[i];
+    console.log('YYYYY');
+    let updatedBalances = await updateErc20Balance(Erc20Contract, tx.logs[i].address, event.payload);
+    console.log('CCCCCC', event.payload);
+    await new Promise(res => {
+      event.payload.save().then(res).catch(
+        console.log
+      );
+    }).timeout(10000);
+    console.log('DDDDDDD');
+    for (let updateBalance of updatedBalances) {
+      console.log('LLLLLLLLLL', `${config.rabbit.serviceName}_balance.${event.name.toLowerCase()}`);
+      channel.publish('events', `${config.rabbit.serviceName}_balance.${event.name.toLowerCase()}`, new Buffer(JSON.stringify(updateBalance)));
+    }
+  }
+};
+
+const checkBalance = async (tx, channel) => {
+  let accounts = tx ? await accountModel.find({address: {$in: [tx.to, tx.from]}}) : [];
+
+  for (let account of accounts) {
+    let balance = await Promise.promisify(web3.eth.getBalance)(account.address);
+    await accountModel.update({address: account.address}, {$set: {balance: balance}})
+      .catch(() => {
+      });
+
+    await  channel.publish('events', `${config.rabbit.serviceName}_balance.${account.address}`, new Buffer(JSON.stringify({
+      address: account.address,
+      balance: balance,
+      tx: tx
+    })));
+  }
+};
+
 
 let init = async () => {
   let conn = await amqp.connect(config.rabbit.url)
@@ -47,9 +99,6 @@ let init = async () => {
     process.exit(0);
   });
 
-  let provider = new Web3.providers.IpcProvider(config.web3.uri, net);
-  const web3 = new Web3();
-  web3.setProvider(provider);
 
   web3.currentProvider.connection.on('end', () => {
     log.error('ipc process has finished!');
@@ -70,24 +119,17 @@ let init = async () => {
   channel.consume(`app_${config.rabbit.serviceName}.balance_processor`, async (data) => {
     try {
       let block = JSON.parse(data.content.toString());
-      let tx = await Promise.promisify(web3.eth.getTransaction)(block.hash || '');
-
-      let accounts = tx ? await accountModel.find({address: {$in: [tx.to, tx.from]}}) : [];
-
-      for (let account of accounts) {
-        let balance = await Promise.promisify(web3.eth.getBalance)(account.address);
-        await accountModel.update({address: account.address}, {$set: {balance: balance}})
-          .catch(() => {
-          });
-
-        await  channel.publish('events', `${config.rabbit.serviceName}_balance.${account.address}`, new Buffer(JSON.stringify({
-          address: account.address,
-          balance: balance,
-          tx: tx
-        })));
+      let tx;
+      try{
+        tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '').timeout(10000);
+      } catch(e) {
+        tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '');
       }
-
+      checkBalance(tx, channel);
+      checkErc20Balance(tx, channel);
     } catch (e) {
+      console.log(e);
+      
       log.error(e);
     }
 

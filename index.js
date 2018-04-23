@@ -125,8 +125,8 @@ let init = async () => {
       } catch(e) {
         tx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '');
       }
-      checkBalance(tx, channel);
-      checkErc20Balance(tx, channel);
+      await checkBalance(tx, channel);
+      await checkErc20Balance(tx, channel);
     } catch (e) {
       console.log(e);
       

@@ -40,7 +40,7 @@ const  net = require('net'),
 
 let TC, accounts, amqpInstance;
 
-describe('core/sc processor', function () {
+describe('core/balance processor', function () {
 
   before(async () => {
     await clearMongoData();
@@ -66,11 +66,12 @@ describe('core/sc processor', function () {
   });
 
   it('send some eth and validate balance changes', async () => {
+    const channel = await amqpInstance.createChannel();  
+    const oldBalance0 = await updateBalanceWithEth(accounts[0], web3);      
+    const oldBalance1 = await updateBalanceWithEth(accounts[1], web3);     
+    
     await Promise.all([
       (async () => {
-        const oldBalance0 = await updateBalanceWithEth(accounts[0], web3);      
-        const oldBalance1 = await updateBalanceWithEth(accounts[1], web3);       
-
         ctx.hash = await Promise.promisify(web3.eth.sendTransaction)({
           from: accounts[0],
           to: accounts[1],
@@ -80,24 +81,25 @@ describe('core/sc processor', function () {
         await Promise.delay(10000);
         const newBalance0 = await getBalanceForAccount(accounts[0]);
         const newBalance1 = await getBalanceForAccount(accounts[1]);
-        expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(0);
-        expect(newBalance1.minus(oldBalance1).toNumber()).to.greaterThan(0);
+        expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(99);
+        expect(newBalance1.minus(oldBalance1).toNumber()).to.greaterThan(99);
       })(),
       (async () => {
-
-        let amqpInstance = await amqp.connect(config.rabbit.url);
-        let channel = await amqpInstance.createChannel();
-        try {
-          await channel.assertExchange('events', 'topic', {durable: false});
-          await channel.assertQueue(`app_${config.rabbit.serviceName}_test.balance`);
-          await channel.bindQueue(`app_${config.rabbit.serviceName}_test.balance`, 'events', `${config.rabbit.serviceName}_balance.*`);
-        } catch (e) {
-          channel = await amqpInstance.createChannel();
-        }
-
-        return await new Promise(res =>
-          channel.consume(`app_${config.rabbit.serviceName}_test.balance`, res, {noAck: true})
-        );
+        await connectToQueue(channel);
+        return await consumeMessages(1, channel, async (message) => {
+          const content = JSON.parse(message.content);
+          if (_.has(content, 'balance') && content.tx.hash  === ctx.hash) {
+            expect(content.address).oneOf([accounts[0], accounts[1]]);
+  
+            if (content.address === accounts[0]) 
+              expect(oldBalance0.minus(new BigNumber(content.balance)).toNumber()).to.greaterThan(99);
+            else 
+              expect(new BigNumber(content.balance).minus(oldBalance1).toNumber()).to.greaterThan(99);
+            
+            return true;
+          } else 
+            return false;
+        });
 
       })(),
       (async () => {
@@ -130,26 +132,30 @@ describe('core/sc processor', function () {
     let transfer;
     return await Promise.all([
       (async () => {
-        transfer = await TC.transfer(accounts[1], 100000, {from: accounts[0]});
+        transfer = await TC.transfer(accounts[1], 100, {from: accounts[0]});
+        console.log(transfer);
       })(),
       (async () => {
         const channel = await amqpInstance.createChannel();  
         await connectToQueue(channel);
         return await consumeMessages(1, channel, async (message) => {
           const content = JSON.parse(message.content);
-          if (_.has(content, 'erc20token') && content.tx.transactionHash  === transfer.tx) {
+          if (_.has(content, 'erc20token') && content.recieptTx.transactionHash  === transfer.tx) {
             expect(content.address).oneOf([accounts[0], accounts[1]]);
-            expect(content.erc20token).to.equal(TC.address);
+            expect(content.erc20token[TC.address]).to.not.undefined;
+
+            const newContentBalance = content['erc20token'][TC.address];
   
+            console.log(newContentBalance, oldBalance0, oldBalance1);
             if (content.address === accounts[0]) 
-              expect(oldBalance0.minus(new BigNumber(content.balance)).toNumber()).to.greaterThan(0);
+              expect(oldBalance0.minus(new BigNumber(newContentBalance)).toNumber()).to.greaterThan(0);
             else 
-              expect(new BigNumber(content.balance).minus(oldBalance1).toNumber()).to.equal(100000);
+              expect(new BigNumber(newContentBalance).minus(oldBalance1).toNumber()).to.equal(100000);
             
             const newBalance0 = await getBalanceForTCAddress(accounts[0], TC);
             const newBalance1 = await getBalanceForTCAddress(accounts[1], TC);
             expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(0);
-            expect(newBalance1.minus(oldBalance1).toNumber()).to.greaterThan(0);
+            expect(newBalance1.minus(oldBalance1).toNumber()).to.equal(100000);
 
             return true;
           } else 

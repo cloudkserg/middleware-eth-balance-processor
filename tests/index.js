@@ -133,7 +133,6 @@ describe('core/balance processor', function () {
     return await Promise.all([
       (async () => {
         transfer = await TC.transfer(accounts[1], 100, {from: accounts[0]});
-        console.log(transfer);
       })(),
       (async () => {
         const channel = await amqpInstance.createChannel();  
@@ -146,16 +145,15 @@ describe('core/balance processor', function () {
 
             const newContentBalance = content['erc20token'][TC.address];
   
-            console.log(newContentBalance, oldBalance0, oldBalance1);
             if (content.address === accounts[0]) 
               expect(oldBalance0.minus(new BigNumber(newContentBalance)).toNumber()).to.greaterThan(0);
             else 
-              expect(new BigNumber(newContentBalance).minus(oldBalance1).toNumber()).to.equal(100000);
+              expect(new BigNumber(newContentBalance).minus(oldBalance1).toNumber()).to.equal(100);
             
             const newBalance0 = await getBalanceForTCAddress(accounts[0], TC);
             const newBalance1 = await getBalanceForTCAddress(accounts[1], TC);
             expect(oldBalance0.minus(newBalance0).toNumber()).to.greaterThan(0);
-            expect(newBalance1.minus(oldBalance1).toNumber()).to.equal(100000);
+            expect(newBalance1.minus(oldBalance1).toNumber()).to.equal(100);
 
             return true;
           } else 

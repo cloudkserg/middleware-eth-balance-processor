@@ -50,7 +50,7 @@ const Erc20Contract = contract(erc20token);
 Erc20Contract.setProvider(provider);
 
 const getAllAddresses = async (tx, recieptTx) => {
-  const addresses = getAddressesFromReciept(recieptTx);
+  const addresses = _.values(getAddressesFromReciept(recieptTx));
   const txAddresses = _.filter(
     getAddressesFromTx(tx),
     txAddr => _.find(addresses, addr => (addr.address === txAddr.address)) === undefined
@@ -67,22 +67,25 @@ const getAddressesFromTx = (tx) => {
 const getAddressesFromReciept = (recieptTx) => {
   if (!recieptTx) 
     return [];
-  const groupAdresses = _.chain(filterTxsBySMEventsService(recieptTx, web3, smEvents))
+  const addresses = _.chain(filterTxsBySMEventsService(recieptTx, web3, smEvents))
     .toPairs()
     .map(value => {
       const event  = value[1].payload;
       const erc20 = recieptTx.logs[value[0]].address;
-      return _.chain(event).pick('from', 'to', 'owner', 'sender').uniq().map(address => ({
-        address, erc20
-      })).value();
+      return  _.chain(event).pick('from', 'to', 'owner', 'sender').values().uniq().map(address => {
+        return {address, erc20};
+      }).value();
     })
     .flattenDeep()
-    .groupBy(address => address.address);
-  
-  return groupAdresses
-    .toPairs()
-    .map(value => _.merge({address: value[0]}, value[1]))
     .value();
+
+  return _.reduce(addresses, (output, addr) => {
+    if (output[addr.address] === undefined)
+      output[addr.address] = {address: addr.address, erc20token: []};
+    
+    output[addr.address]['erc20token'].push(addr.erc20);
+    return output;
+  }, {});
 };
 
 
@@ -113,23 +116,25 @@ const buildUpdates = async (filteredAddresses, tx, recieptTx) => {
 };
 
 const buildUpdate = async (addrObj) => {
-  const update =  _.chain(addrObj)
-    .merge({balance: await getBalance(addrObj.address)})
-    .value();
-  if (addrObj.erc20) 
-    update['erc20token'] = await Promise.map(addrObj.erc20, async erc20Addr => ({
-      [erc20Addr]: await getErc20Balance(erc20Addr, addrObj.address)
+  const update = {
+    address: addrObj.address,
+    balance: await getBalance(addrObj.address)
+  };
+  if (addrObj.erc20token !== undefined) 
+    update['erc20token'] = await Promise.map(addrObj.erc20token, async erc20Addr => ({
+      erc20Addr,
+      balance: await getErc20Balance(erc20Addr, addrObj.address)
     })); 
   return update;
 };
 
 const updateBalancesAndGetModels  = async (updates) => {
   return await Promise.mapSeries(updates, async update => {
-    const fields = {balance: update.balance};
-    if (update['erc20']) 
-      fields['erc20token'] = update['erc20']; 
-    
-
+    const fields = {balance: update.balance, address: update.address};
+    if (update['erc20token'] !== undefined) 
+      update['erc20token'].forEach(token => {
+        fields[`erc20token.${token.erc20Addr}`] = token.balance;
+      });
     return await accountModel.findOneAndUpdate({address: update.address}, {$set: fields}, {new: true});
   });
 };
@@ -183,13 +188,10 @@ let init = async () => {
       const recieptTx = await Promise.promisify(web3.eth.getTransactionReceipt)(block.hash || '').timeout(10000);
 
       const filteredAddresses = await getAllAddresses(tx, recieptTx);
-      console.log('VVV', filteredAddresses);
       const updates = await buildUpdates(filteredAddresses);
-      console.log('UUU', updates);
       
       const models = await updateBalancesAndGetModels(updates);
       const messages = buildMessages(models, tx, recieptTx);
-      console.log('MMMM', messages);
       await Promise.map(messages, async message => {
         await  channel.publish('events', `${config.rabbit.serviceName}_balance.${message.address}`, new Buffer(JSON.stringify(message)));
       });
